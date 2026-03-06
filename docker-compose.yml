@@ -1,0 +1,17 @@
+ version: "3.8"
+ services:
+   mnemo:
+     build: .
+     ports:
+       - "8000:8000"
+     env_file: .env
+     depends_on:
+       - redis
+     volumes:
+       - ./mnemo.db:/app/mnemo.db
+       - ./qdrant_storage:/app/qdrant_storage
+ 
+   redis:
+     image: redis:7-alpine
+     ports:
+       - "6379:6379"
