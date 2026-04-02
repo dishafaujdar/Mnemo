@@ -1,0 +1,40 @@
+# Environment
+.env
+.env.local
+.venv
+venv
+env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Mnemo data
+mnemo.db
+mnemo.db-journal
+qdrant_storage/
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+CODEBASE_GUIDE.md
+config.py

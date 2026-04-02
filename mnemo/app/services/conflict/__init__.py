@@ -1,0 +1,1 @@
+# Conflict resolution: temporal invalidation
