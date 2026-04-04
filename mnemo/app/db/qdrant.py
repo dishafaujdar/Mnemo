@@ -19,7 +19,8 @@ from qdrant_client.http.models import (
 from mnemo.app.core.config import settings
 
 COLLECTION_NAME = "mnemo_semantic"
-VECTOR_SIZE = 1536  # text-embedding-3-small
+# VECTOR_SIZE = 1536  # text-embedding-3-small
+VECTOR_SIZE = 768
 
 
 def get_qdrant_client() -> AsyncQdrantClient:

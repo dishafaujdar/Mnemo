@@ -55,6 +55,7 @@ async def retrieve(
     """Hybrid search → ranked context; include profile."""
     budget = token_budget or settings.default_token_budget
     memories = await hybrid_retrieve(session, query, user_id, token_budget=budget)
+    print(f"[DEBUG] retrieve relevance_scores={[m[6] for m in memories]}")
     profile = await get_profile(session, user_id)
     token_count = sum(count_tokens(m[1]) for m in memories)
     return RetrieveResponse(
