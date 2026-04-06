@@ -17,7 +17,7 @@ from mnemo.app.models.memory import (
 from mnemo.app.services.memory.episodic import store_turn
 from mnemo.app.services.memory.profile import get_profile
 from mnemo.app.db.qdrant import get_qdrant_client
-from mnemo.app.services.conflict.resolver import invalidate_memory_by_id
+from mnemo.app.services.conflict.resolver import invalidate_memory_by_id, rebuild_missing_qdrant_points
 from mnemo.app.services.retrieval.budget import count_tokens
 from mnemo.app.services.retrieval.hybrid import retrieve as hybrid_retrieve
 from mnemo.app.workers.queue import enqueue_extraction
@@ -39,9 +39,9 @@ async def ingest(
         session_id=body.session_id,
         metadata=body.metadata,
     )
-    await session.commit()
-    await enqueue_extraction(episode_id, body.user_id)
-    return IngestResponse(episode_id=episode_id, status="ingested", extraction="queued")
+    await session.commit() # adding to db
+    await enqueue_extraction(episode_id, body.user_id) # calling spacy or llm api (low confi.) for extraction
+    return IngestResponse(episode_id=episode_id, status="ingested", extraction="queued") # ingestig again to db
 
 
 @router.get("/retrieve", response_model=RetrieveResponse)
@@ -92,3 +92,19 @@ async def delete_memory(
         status="invalidated",
         invalid_at=datetime.utcnow(),
     )
+
+
+@router.post("/admin/repair-qdrant")
+async def repair_qdrant(
+    user_id: str | None = None,
+    _api_key: str = Depends(require_api_key),
+    session: AsyncSession = Depends(get_session),
+):
+    """Repair missing active Qdrant points from SQLite."""
+    qdrant = get_qdrant_client()
+    rebuilt = await rebuild_missing_qdrant_points(session, qdrant, user_id=user_id)
+    return {
+        "status": "completed",
+        "user_id": user_id,
+        "rebuilt_points": rebuilt,
+    }

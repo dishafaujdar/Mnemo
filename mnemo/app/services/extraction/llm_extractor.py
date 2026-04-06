@@ -12,6 +12,24 @@ from mnemo.app.core.config import settings
 from mnemo.app.models.extraction import TripletFact
 
 logger = logging.getLogger(__name__)
+_client: AsyncOpenAI | None = None
+
+ALLOWED_RELATIONS = {
+    "PREFERS",
+    "DISLIKES",
+    "WORKS_ON",
+    "USES",
+    "KNOWS",
+    "IS",
+    "HAS",
+    "SWITCHED_FROM",
+    "SWITCHED_TO",
+    "BUILDING",
+    "STRUGGLES_WITH",
+    "LEARNED",
+    "WORKS_AT",
+    "GOAL_IS",
+}
 
 EXTRACTION_SYSTEM_PROMPT = """You are a fact extractor for a memory system used by a coding assistant.
 
@@ -21,14 +39,69 @@ Focus on:
 - User's current projects and goals
 - Technical context (stack, architecture decisions)
 - Personal facts (name, role, experience level)
-- Contradictions or updates to previously stated facts
+- Explicit user-stated facts from the current conversation turn
 
 Return ONLY facts explicitly stated or strongly implied.
 Do NOT invent or assume facts.
+Never emit generic knowledge facts from named entities alone.
+Use subject "user" unless the conversation explicitly states a different subject for a memory-worthy fact.
+Prefer omitting a fact over returning a weak or ambiguous one.
 
-Output as a JSON array. Each element must have: subject, relation, object, fact_string, confidence (0-1).
+Output as a JSON object with a top-level "facts" array.
+Each fact must have: subject, relation, object, fact_string, confidence (0-1).
 Relation types to use: PREFERS, DISLIKES, WORKS_ON, USES, KNOWS, IS, HAS, SWITCHED_FROM, SWITCHED_TO,
 BUILDING, STRUGGLES_WITH, LEARNED, WORKS_AT, GOAL_IS."""
+
+
+def _get_client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(
+            api_key=settings.openai_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
+    return _client
+
+
+def _normalize_subject(subject: str) -> str:
+    normalized = subject.strip().lower()
+    if normalized in {"", "i", "me", "myself", "we", "us", "my", "our"}:
+        return "user"
+    return subject.strip() or "user"
+
+
+def _normalize_relation(relation: str) -> str:
+    return relation.strip().upper().replace(" ", "_")
+
+
+def _normalize_object(value: str) -> str:
+    return " ".join(value.strip().strip(".,;:!?").split())[:512]
+
+
+def _normalize_fact_string(subject: str, relation: str, obj: str, provided: str) -> str:
+    fact_string = " ".join(provided.strip().split())
+    if fact_string:
+        return fact_string[:512]
+    return f"{subject} {relation.lower().replace('_', ' ')} {obj}"[:512]
+
+
+def _dedupe_facts(facts: list[TripletFact]) -> list[TripletFact]:
+    by_key: dict[tuple[str, str, str], TripletFact] = {}
+    for fact in facts:
+        key = (fact.subject.lower(), fact.relation.upper(), fact.object.lower())
+        if key not in by_key or fact.confidence > by_key[key].confidence:
+            by_key[key] = fact
+    return list(by_key.values())
+
+
+def _skeptical_confidence(raw_confidence: float, relation: str, obj: str) -> float:
+    confidence = max(0.0, min(1.0, raw_confidence))
+    confidence -= 0.08
+    if relation == "IS" and len(obj.split()) > 4:
+        confidence -= 0.05
+    if len(obj) > 64:
+        confidence -= 0.04
+    return max(0.0, min(0.95, confidence))
 
 
 async def extract(content: str) -> list[TripletFact]:
@@ -36,7 +109,7 @@ async def extract(content: str) -> list[TripletFact]:
     if not content.strip() or not settings.openai_api_key:
         logger.error("OPENAI_API_KEY not set — LLM extraction skipped")
         return []
-    client = AsyncOpenAI(api_key=settings.openai_api_key,base_url="https://api.groq.com/openai/v1",)
+    client = _get_client()
     try:
         resp = await client.chat.completions.create(
             model=settings.extraction_model,
@@ -74,24 +147,23 @@ async def extract(content: str) -> list[TripletFact]:
         if not isinstance(item, dict):
             continue
         try:
-            subj = str(item.get("subject", "user")).strip() or "user"
-            rel = str(item.get("relation", "")).strip().upper().replace(" ", "_")
-            obj = str(item.get("object", "")).strip()
-            fact_str = str(item.get("fact_string", f"{subj} {rel} {obj}")).strip()
-            conf = float(item.get("confidence", 0.9))
-            conf = max(0.0, min(1.0, conf))
-            if not rel or not obj:
+            subj = _normalize_subject(str(item.get("subject", "user")))
+            rel = _normalize_relation(str(item.get("relation", "")))
+            obj = _normalize_object(str(item.get("object", "")))
+            fact_str = _normalize_fact_string(subj, rel, obj, str(item.get("fact_string", "")))
+            conf = _skeptical_confidence(float(item.get("confidence", 0.9)), rel, obj)
+            if not rel or rel not in ALLOWED_RELATIONS or not obj:
                 continue
             facts.append(
                 TripletFact(
                     subject=subj,
                     relation=rel,
-                    object=obj[:512],
-                    fact_string=fact_str or f"User {rel.lower()} {obj}",
+                    object=obj,
+                    fact_string=fact_str,
                     confidence=conf,
                 )
             )
         except (TypeError, ValueError):
             logger.exception(f"Error processing item: {item}")
             continue
-    return facts
+    return _dedupe_facts(facts)

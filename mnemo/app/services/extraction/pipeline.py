@@ -2,22 +2,38 @@
 
 from __future__ import annotations
 
+import re
+
 from mnemo.app.core.config import settings
 from mnemo.app.models.extraction import TripletFact
 from mnemo.app.services.extraction.llm_extractor import extract as llm_extract
 from mnemo.app.services.extraction.spacy_extractor import extract as spacy_extract
 from mnemo.app.services.extraction.spacy_extractor import get_nlp
 
+LOW_CONFIDENCE_THRESHOLD = 0.78
+COMPLEX_LANGUAGE_PATTERN = re.compile(
+    r"\b(?:prefer|love|hate|always|never|no longer|used to|switched to|switched from|goal is|goal are|but now)\b",
+    re.IGNORECASE,
+)
+
+
+def _average_confidence(facts: list[TripletFact]) -> float:
+    if not facts:
+        return 0.0
+    return sum(f.confidence for f in facts) / len(facts)
+
 
 def _needs_llm_pass(facts: list[TripletFact], content: str) -> bool:
-    """Trigger LLM if: low entity count, or preference/opinion language."""
-    if len(facts) >= 3:
-        return False
-    preference_words = ("prefer", "love", "hate", "always", "never", "switched to", "goal is")
-    content_lower = content.lower()
-    if any(w in content_lower for w in preference_words):
+    """Trigger LLM when spaCy coverage or confidence is weak, or the language is update-heavy."""
+    if not facts:
         return True
-    return len(facts) < 2
+    if _average_confidence(facts) < LOW_CONFIDENCE_THRESHOLD:
+        return True
+    if len(facts) < 2:
+        return True
+    if COMPLEX_LANGUAGE_PATTERN.search(content) and len(facts) < 3:
+        return True
+    return False
 
 
 def _merge_facts(spacy_facts: list[TripletFact], llm_facts: list[TripletFact]) -> list[TripletFact]:

@@ -3,7 +3,7 @@
 import pytest
 
 from mnemo.app.models.extraction import TripletFact
-from mnemo.app.services.conflict.resolver import is_contradiction, is_duplicate
+from mnemo.app.services.conflict.resolver import PROFILE_RELATIONS, is_contradiction, is_duplicate
 
 
 class _MockEdge:
@@ -39,3 +39,7 @@ def test_is_contradiction_same_object():
     fact = TripletFact(subject="user", relation="IS", object="developer", fact_string="User is developer", confidence=0.9)
     existing = [_MockEdge("developer")]
     assert is_contradiction(fact, existing) is False
+
+
+def test_switched_to_updates_current_stack_profile_key():
+    assert PROFILE_RELATIONS["SWITCHED_TO"] == "current_stack"

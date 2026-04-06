@@ -8,17 +8,45 @@ from uuid import uuid4
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from qdrant_client.http.models import PointStruct
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from mnemo.app.db.models import SemanticEdge
-from mnemo.app.db.qdrant import get_qdrant_client, set_point_payload, upsert_points
+from mnemo.app.db.qdrant import ensure_collection, get_qdrant_client, point_exists, set_point_payload, upsert_points
 from mnemo.app.models.extraction import TripletFact
 from mnemo.app.services.embeddings import get_embedding
+from mnemo.app.services.memory.profile import set_fact
 
 SINGULAR_RELATIONS = {"IS", "WORKS_AT", "SWITCHED_TO", "GOAL_IS"}
 
 
+PROFILE_RELATIONS = {
+    "IS": "role",
+    "WORKS_AT": "company",
+    "WORKS_ON": "current_project",
+    "GOAL_IS": "goal",
+    "SWITCHED_TO": "current_stack",
+}
+
+
 def _gen_id() -> str:
     return str(uuid4())
+
+
+def _profile_value_for_fact(fact: TripletFact) -> str | None:
+    value = fact.object.strip()
+    if not value:
+        return None
+    if fact.relation == "IS":
+        lowered = value.lower()
+        if lowered.startswith(("a ", "an ", "the ")):
+            value = value.split(" ", 1)[1].strip()
+        if len(value.split()) > 6:
+            return None
+    if fact.relation == "WORKS_ON" and len(value.split()) > 12:
+        return None
+    if fact.relation == "GOAL_IS" and len(value) > 200:
+        return None
+    return value
 
 
 async def get_active_edges(
@@ -73,7 +101,16 @@ async def invalidate_edges(
     if qdrant_client is not None:
         at_str = invalidated_at.isoformat()
         for e in edges:
-            await set_point_payload(qdrant_client, e.id, {"invalid_at": at_str})
+            point_id = e.qdrant_id or e.id
+            if not point_id:
+                continue
+            try:
+                await set_point_payload(qdrant_client, point_id, {"invalid_at": at_str})
+            except UnexpectedResponse as exc:
+                if exc.status_code == 404:
+                    print(f"[WARN] missing qdrant point during invalidation edge_id={e.id} point_id={point_id}")
+                    continue
+                raise
 
 
 async def insert_edge(
@@ -115,7 +152,60 @@ async def insert_edge(
     )
     db.add(row)
     await db.flush()
+    await _maybe_update_profile(db, user_id, fact)
     return edge_id
+
+
+async def rebuild_missing_qdrant_points(
+    db: AsyncSession,
+    qdrant_client=None,
+    user_id: str | None = None,
+) -> int:
+    """
+    Rebuild active semantic edges that exist in SQLite but are missing in Qdrant.
+    SQLite remains the source of truth; only active edges with enough data are rehydrated.
+    """
+    if qdrant_client is None:
+        qdrant_client = get_qdrant_client()
+    await ensure_collection(qdrant_client)
+
+    q = select(SemanticEdge).where(SemanticEdge.invalid_at.is_(None))
+    if user_id is not None:
+        q = q.where(SemanticEdge.user_id == user_id)
+    result = await db.execute(q)
+    edges = list(result.scalars().all())
+
+    rebuilt = 0
+    for edge in edges:
+        point_id = edge.qdrant_id or edge.id
+        if not point_id or not edge.fact_string.strip():
+            continue
+        try:
+            if await point_exists(qdrant_client, point_id):
+                continue
+        except UnexpectedResponse:
+            continue
+
+        vector = await get_embedding(edge.fact_string)
+        payload = {
+            "user_id": edge.user_id,
+            "edge_id": edge.id,
+            "episode_id": edge.episode_id,
+            "invalid_at": None,
+            "relation": edge.relation,
+            "valid_at": edge.valid_at.isoformat(),
+            "fact_string": edge.fact_string,
+            "confidence": edge.confidence,
+        }
+        point = PointStruct(id=point_id, vector=vector, payload=payload)
+        await upsert_points(qdrant_client, [point])
+        if edge.qdrant_id != point_id:
+            edge.qdrant_id = point_id
+        rebuilt += 1
+
+    if rebuilt:
+        await db.flush()
+    return rebuilt
 
 
 async def invalidate_memory_by_id(
@@ -162,3 +252,16 @@ async def resolve_and_store(
             await insert_edge(db, fact, episode_id, user_id, qdrant_client)
         else:
             await insert_edge(db, fact, episode_id, user_id, qdrant_client)
+
+
+async def _maybe_update_profile(db, user_id: str, fact: TripletFact) -> None:
+    key = PROFILE_RELATIONS.get(fact.relation)
+    print(f"[DEBUG] profile key={key} relation={fact.relation} object={fact.object}")
+    if not key:
+        return
+    value = _profile_value_for_fact(fact)
+    print(f"[DEBUG] profile value={value}")
+    if value is None:
+        return
+    await set_fact(db, user_id, key, value)
+    print(f"[DEBUG] profile set {key}={value} for {user_id}")

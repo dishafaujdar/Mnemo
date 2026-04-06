@@ -62,6 +62,20 @@ async def set_point_payload(
     )
 
 
+async def point_exists(
+    client: AsyncQdrantClient,
+    point_id: str,
+) -> bool:
+    """Return True if a point exists in the semantic collection."""
+    points = await client.retrieve(
+        collection_name=COLLECTION_NAME,
+        ids=[point_id],
+        with_payload=False,
+        with_vectors=False,
+    )
+    return bool(points)
+
+
 async def search_semantic(
     client: AsyncQdrantClient,
     query_vector: list[float],
