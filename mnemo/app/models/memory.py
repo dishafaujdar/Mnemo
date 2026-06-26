@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class IngestMessage(BaseModel):
@@ -27,10 +27,12 @@ class IngestResponse(BaseModel):
 class RetrievedMemory(BaseModel):
     fact: str
     confidence: float
-    valid_at: datetime
-    invalid_at: datetime | None
+    valid_from: datetime
+    valid_until: datetime | None
     source_episode_id: str
     relevance_score: float
+    recorded_at: datetime
+    retracted_at: datetime | None
 
 
 class RetrieveResponse(BaseModel):
@@ -39,19 +41,49 @@ class RetrieveResponse(BaseModel):
     token_count: int
 
 
+class RetrieveRequest(BaseModel):
+    user_id: str
+    query: str
+    limit: int = 10
+    as_of_valid_time = None
+    as_of_transaction_time = None
+    max_tokens: int = 2000
+
+    @model_validator(mode='after')
+    def set_temporal_defaults(self) -> 'RetrieveRequest':
+        now = datetime.now(timezone.utc)
+        if self.as_of_valid_time is None:
+            self.as_of_valid_time = now
+        if self.as_of_transaction_time is None:
+            self.as_of_transaction_time = now
+        return self
+
+
 class SearchRequest(BaseModel):
     user_id: str
     query: str
     limit: int = 10
-    valid_only: bool = True
-    include_history: bool = False
+    as_of_valid_time = None
+    as_of_transaction_time = None
+    valid_only: bool = True #only return facts where valid_until IS NULL
+
+    @model_validator(mode='after')
+    def set_temporal_defaults(self) -> 'SearchRequest':
+        now = datetime.now(timezone.utc)
+        if self.as_of_valid_time is None:
+            self.as_of_valid_time = now
+        if self.as_of_transaction_time is None:
+            self.as_of_transaction_time = now
+        return self
 
 
 class SearchResultItem(BaseModel):
     fact: str
     confidence: float
-    valid_at: datetime
-    invalid_at: datetime | None
+    valid_from: datetime
+    valid_until: datetime | None
+    recorded_at: datetime
+    retracted_at: datetime | None
     source_episode_id: str
     relevance_score: float
 
@@ -63,4 +95,4 @@ class SearchResponse(BaseModel):
 class DeleteMemoryResponse(BaseModel):
     id: str
     status: str = "invalidated"
-    invalid_at: datetime | None
+    retracted_at: datetime | None
