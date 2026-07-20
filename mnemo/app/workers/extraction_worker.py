@@ -19,8 +19,7 @@ async def run_extraction(ctx: dict, episode_id: str, user_id: str) -> None:
         if episode is None:
             return
         content = episode.content or ""
-        facts = await extract_facts(content, settings.spacy_model)
-        print(f"facts",facts)
+        facts = await extract_facts(content, user_id)
         if not facts:
             await db.commit()
             return

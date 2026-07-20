@@ -1,1 +1,1 @@
-# Extraction: spaCy, LLM, pipeline
+# Extraction: GLiNER2 (local) + Instructor/Groq (structured) two-stage pipeline

@@ -10,12 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from qdrant_client.http.models import PointStruct
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from mnemo.app.db.models import SemanticEdge
+from mnemo.app.db.models import SemanticEdge, UnknownRelation
 from mnemo.app.db.qdrant import ensure_collection, get_qdrant_client, point_exists, set_point_payload, upsert_points
-from mnemo.app.models.extraction import TripletFact
+from mnemo.app.models.extraction import REVIEW_PENDING, TripletFact
 from mnemo.app.services.embeddings import get_embedding
 from mnemo.app.services.memory.profile import set_fact
+from mnemo.app.services.ontology.manager import get_ontology
+from mnemo.app.services.ontology.seed import RelationBehavior
 
+# Kept for backwards compatibility; canonical behavior now lives in the ontology.
 SINGULAR_RELATIONS = {"IS", "WORKS_AT", "SWITCHED_TO", "GOAL_IS"}
 
 
@@ -78,8 +81,12 @@ def is_duplicate(fact: TripletFact, existing: list[SemanticEdge]) -> bool:
 
 
 def is_contradiction(fact: TripletFact, existing: list[SemanticEdge]) -> bool:
-    """True for singular-value relations when existing has different object."""
-    if fact.relation not in SINGULAR_RELATIONS:
+    """True for singular-value relations when existing has a different object.
+
+    Behavior is driven by the soft ontology: only SINGULAR relations can
+    contradict; MULTI and TEMPORAL relations always coexist.
+    """
+    if not get_ontology().is_singular(fact.relation):
         return False
     obj = fact.object.strip().lower()
     for e in existing:
@@ -143,6 +150,9 @@ async def insert_edge(
         relation=fact.relation,
         object=fact.object,
         fact_string=fact.fact_string,
+        relation_raw=fact.relation_raw or None,
+        relation_match_score=fact.relation_match_score,
+        review_status=fact.review_status,
         qdrant_id=edge_id,
         episode_id=episode_id,
         confidence=fact.confidence,
@@ -152,8 +162,37 @@ async def insert_edge(
     )
     db.add(row)
     await db.flush()
+    if fact.review_status == REVIEW_PENDING:
+        await _record_unknown_relation(db, fact)
     await _maybe_update_profile(db, user_id, fact)
     return edge_id
+
+
+async def _record_unknown_relation(db: AsyncSession, fact: TripletFact) -> None:
+    """Upsert an unknown relation into the audit queue (count + running avg)."""
+    result = await db.execute(
+        select(UnknownRelation).where(UnknownRelation.relation == fact.relation)
+    )
+    row = result.scalars().first()
+    now = datetime.utcnow()
+    if row is None:
+        db.add(
+            UnknownRelation(
+                relation=fact.relation,
+                relation_raw=fact.relation_raw or None,
+                count=1,
+                avg_confidence=fact.confidence,
+                status="pending",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    else:
+        total = row.avg_confidence * row.count + fact.confidence
+        row.count += 1
+        row.avg_confidence = total / row.count
+        row.updated_at = now
+    await db.flush()
 
 
 async def rebuild_missing_qdrant_points(
@@ -232,26 +271,27 @@ async def resolve_and_store(
     qdrant_client=None,
 ) -> None:
     """
-    For each fact: if no existing active edge -> insert.
-    If duplicate -> skip. If contradiction -> invalidate existing then insert.
-    Otherwise -> insert (coexisting).
+    Bi-temporal resolution driven by ontology behavior:
+    - SINGULAR: contradiction (different object) invalidates the old edge, then inserts.
+    - MULTI:    coexist; insert unless it's a duplicate.
+    - TEMPORAL: keep as history; insert unless it's a duplicate, never invalidate.
     """
     if qdrant_client is None:
         qdrant_client = get_qdrant_client()
     now = datetime.utcnow()
+    ontology = get_ontology()
     for fact in new_facts:
         existing = await get_active_edges(db, user_id, fact.subject.lower(), fact.relation)
-        print(f"[DEBUG] existing='{existing}'")
         if not existing:
             await insert_edge(db, fact, episode_id, user_id, qdrant_client)
             continue
         if is_duplicate(fact, existing):
             continue
-        if is_contradiction(fact, existing):
+        behavior = ontology.behavior_for(fact.relation)
+        if behavior is RelationBehavior.SINGULAR and is_contradiction(fact, existing):
             await invalidate_edges(db, existing, now, qdrant_client)
-            await insert_edge(db, fact, episode_id, user_id, qdrant_client)
-        else:
-            await insert_edge(db, fact, episode_id, user_id, qdrant_client)
+        # MULTI and TEMPORAL never invalidate; they coexist / accrue history.
+        await insert_edge(db, fact, episode_id, user_id, qdrant_client)
 
 
 async def _maybe_update_profile(db, user_id: str, fact: TripletFact) -> None:

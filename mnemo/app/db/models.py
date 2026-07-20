@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -43,6 +43,12 @@ class SemanticEdge(Base):
     relation: Mapped[str] = mapped_column(String(128), nullable=False)
     object: Mapped[str] = mapped_column(String(512), nullable=False)
     fact_string: Mapped[str] = mapped_column(Text, nullable=False)
+    # Relation as originally emitted by the extractor, before ontology normalization.
+    relation_raw: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Fuzzy ontology match score (1.0 = exact/canonical, <threshold = unknown).
+    relation_match_score: Mapped[float] = mapped_column(Float, default=1.0)
+    # confirmed | fuzzy | pending (unknown relation, flagged for audit).
+    review_status: Mapped[str] = mapped_column(String(32), default="confirmed")
     qdrant_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     episode_id: Mapped[str] = mapped_column(
         String(36),
@@ -75,3 +81,25 @@ class ProfileFact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("user_id", "key", name="uq_profile_facts_user_key"),)
+
+
+class UnknownRelation(Base):
+    """Audit queue for relations that didn't match the ontology.
+
+    Populated when facts with unknown (fuzzy-miss) relations are stored. A
+    periodic human/automated audit can promote frequent ones into the seed
+    ontology and assign them a behavior (singular/multi/temporal).
+    """
+
+    __tablename__ = "unknown_relations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
+    relation: Mapped[str] = mapped_column(String(128), nullable=False)  # canonical token
+    relation_raw: Mapped[str | None] = mapped_column(String(128), nullable=True)  # sample phrasing
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    avg_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), default="pending")  # pending | promoted | ignored
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("relation", name="uq_unknown_relations_relation"),)

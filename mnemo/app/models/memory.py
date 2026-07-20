@@ -1,6 +1,6 @@
 """Pydantic schemas for memory API: ingest, retrieve, search."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
@@ -45,8 +45,8 @@ class RetrieveRequest(BaseModel):
     user_id: str
     query: str
     limit: int = 10
-    as_of_valid_time = None
-    as_of_transaction_time = None
+    as_of_valid_time: datetime | None = None
+    as_of_transaction_time: datetime | None = None
     max_tokens: int = 2000
 
     @model_validator(mode='after')
@@ -63,8 +63,8 @@ class SearchRequest(BaseModel):
     user_id: str
     query: str
     limit: int = 10
-    as_of_valid_time = None
-    as_of_transaction_time = None
+    as_of_valid_time: datetime | None = None
+    as_of_transaction_time: datetime | None = None
     valid_only: bool = True #only return facts where valid_until IS NULL
 
     @model_validator(mode='after')
