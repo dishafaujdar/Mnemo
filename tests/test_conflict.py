@@ -41,5 +41,14 @@ def test_is_contradiction_same_object():
     assert is_contradiction(fact, existing) is False
 
 
-def test_switched_to_updates_current_stack_profile_key():
-    assert PROFILE_RELATIONS["SWITCHED_TO"] == "current_stack"
+def test_uses_not_in_profile_relations():
+    assert "USES" not in PROFILE_RELATIONS
+    assert PROFILE_RELATIONS["HAS_ROLE"] == "role"
+
+
+def test_profile_rejects_noisy_works_at_object():
+    from mnemo.app.services.conflict.resolver import _profile_value_for_object
+
+    noisy = "Deepmind as ai engineer and mainly use Python"
+    assert _profile_value_for_object("WORKS_AT", noisy) is None
+    assert _profile_value_for_object("WORKS_AT", "Deepmind") == "Deepmind"

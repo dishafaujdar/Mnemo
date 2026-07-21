@@ -9,9 +9,10 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mnemo.app.db.models import SemanticEdge
+from mnemo.app.services.conflict.temporal import retracted_at
 
-# (edge_id, fact_string, confidence, valid_at, invalid_at, episode_id, score)
-BM25Result = tuple[str, str, float, datetime, datetime | None, str, float]
+# (edge_id, fact_string, confidence, valid_at, valid_until, retracted_at, episode_id, score)
+BM25Result = tuple[str, str, float, datetime, datetime | None, datetime | None, str, float]
 
 
 async def bm25_search(
@@ -21,7 +22,7 @@ async def bm25_search(
     valid_only: bool = True,
     limit: int = 20,
 ) -> list[BM25Result]:
-    """Run BM25 over fact_string for user's edges; return list of (id, fact, confidence, valid_at, invalid_at, episode_id, score)."""
+    """Run BM25 over fact_string for user's edges; return list of (id, fact, confidence, valid_from, valid_until, retracted_at, episode_id, score)."""
     conditions = [SemanticEdge.user_id == user_id]
     if valid_only:
         conditions.append(SemanticEdge.invalid_at.is_(None))
@@ -52,6 +53,7 @@ async def bm25_search(
                 e.confidence,
                 e.valid_at,
                 e.invalid_at,
+                retracted_at(e),
                 e.episode_id,
                 float(score),
             )

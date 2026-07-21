@@ -32,8 +32,9 @@ def test_ingest_returns_200(client: TestClient):
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "ingested"
-    assert data["extraction"] == "queued"
+    assert data["extraction"] in {"completed", "queued", "enqueue_failed"}
     assert "episode_id" in data and data["episode_id"]
+    assert "facts_stored" in data
 
 
 def test_retrieve_empty(client: TestClient):

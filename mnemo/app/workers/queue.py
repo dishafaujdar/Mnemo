@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from arq import create_pool
 from arq.connections import RedisSettings
 
 from mnemo.app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def enqueue_extraction(episode_id: str, user_id: str) -> bool:
@@ -16,5 +20,12 @@ async def enqueue_extraction(episode_id: str, user_id: str) -> bool:
         await pool.enqueue_job("run_extraction", episode_id, user_id)
         await pool.close()
         return True
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "Failed to enqueue extraction for episode=%s user=%s redis=%s: %s",
+            episode_id,
+            user_id,
+            settings.redis_url,
+            exc,
+        )
         return False

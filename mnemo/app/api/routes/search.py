@@ -27,10 +27,12 @@ async def search(
             SearchResultItem(
                 fact=item[1],
                 confidence=item[2],
-                valid_at=item[3],
-                invalid_at=item[4],
-                source_episode_id=item[5],
-                relevance_score=item[6],
+                valid_from=item[3],
+                valid_until=item[4],
+                source_episode_id=item[6],
+                relevance_score=item[7],
+                recorded_at=item[3],
+                retracted_at=item[5],
             )
             for item in items
         ]

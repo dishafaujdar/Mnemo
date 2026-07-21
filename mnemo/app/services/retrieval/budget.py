@@ -23,8 +23,8 @@ def count_tokens(text: str) -> int:
     return len(enc.encode(text))
 
 
-# One memory item: (edge_id, fact_string, confidence, valid_at, invalid_at, episode_id, score)
-RetrievalItem = tuple[str, str, float, object, object, str, float]
+# One memory item: (edge_id, fact_string, confidence, valid_at, valid_until, retracted_at, episode_id, score)
+RetrievalItem = tuple[str, str, float, object, object, object, str, float]
 
 
 def fit(
@@ -33,13 +33,13 @@ def fit(
 ) -> list[RetrievalItem]:
     """
     Greedily pack memories into token budget. Assumes already ranked (e.g. by RRF).
-    Each item: (edge_id, fact_string, confidence, valid_at, invalid_at, episode_id, score).
+    Each item: (edge_id, fact_string, confidence, valid_from, valid_until, retracted_at, episode_id, score).
     """
     budget = budget or settings.default_token_budget
     result: list[RetrievalItem] = []
     used = 0
     for item in memories:
-        _id, fact, conf, valid_at, invalid_at, episode_id, score = item
+        _id, fact, conf, valid_at, valid_until, retracted_at, episode_id, score = item
         tokens = count_tokens(fact)
         if used + tokens <= budget:
             result.append(item)

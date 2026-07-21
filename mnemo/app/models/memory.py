@@ -22,6 +22,7 @@ class IngestResponse(BaseModel):
     episode_id: str
     status: str = "ingested"
     extraction: str = "queued"
+    facts_stored: int = 0
 
 
 class RetrievedMemory(BaseModel):

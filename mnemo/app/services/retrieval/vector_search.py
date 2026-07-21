@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from mnemo.app.db.qdrant import get_qdrant_client, search_semantic
+from mnemo.app.services.conflict.temporal import retracted_at_from_payload
 from mnemo.app.services.embeddings import get_embedding
 
-# Same shape as BM25Result: (edge_id, fact_string, confidence, valid_at, invalid_at, episode_id, score)
-VectorResult = tuple[str, str, float, datetime, datetime | None, str, float]
+# Same shape as BM25Result
+VectorResult = tuple[str, str, float, datetime, datetime | None, datetime | None, str, float]
 
 
 def _parse_dt(s: str | None) -> datetime | None:
@@ -27,7 +28,7 @@ async def vector_search(
     limit: int = 20,
     qdrant_client=None,
 ) -> list[VectorResult]:
-    """Semantic search; returns list of (id, fact_string, confidence, valid_at, invalid_at, episode_id, score)."""
+    """Semantic search; returns list of (id, fact_string, confidence, valid_from, valid_until, retracted_at, episode_id, score)."""
     if not query.strip():
         return []
     if qdrant_client is None:
@@ -43,7 +44,8 @@ async def vector_search(
             continue
         confidence = float(payload.get("confidence", 1.0))
         valid_at = _parse_dt(payload.get("valid_at")) or datetime.utcnow()
-        invalid_at = _parse_dt(payload.get("invalid_at"))
+        valid_until = _parse_dt(payload.get("invalid_at"))
+        retracted = retracted_at_from_payload(payload)
         episode_id = str(payload.get("episode_id", ""))
-        out.append((point_id, fact_string, confidence, valid_at, invalid_at, episode_id, score))
+        out.append((point_id, fact_string, confidence, valid_at, valid_until, retracted, episode_id, score))
     return out

@@ -2,31 +2,38 @@
 
 from __future__ import annotations
 
-from arq.connections import ArqRedis, RedisSettings, create_pool
+import logging
+
+from arq.connections import RedisSettings, create_pool
 
 from mnemo.app.core.config import settings
-from mnemo.app.db.qdrant import ensure_collection, get_qdrant_client
 from mnemo.app.db.sqlite import async_session_factory
-from mnemo.app.services.conflict.resolver import rebuild_missing_qdrant_points, resolve_and_store
-from mnemo.app.services.extraction.pipeline import extract_facts
-from mnemo.app.services.memory.episodic import get_episode
+from mnemo.app.services.conflict.resolver import rebuild_missing_qdrant_points
+from mnemo.app.services.extraction.service import process_episode_extraction
+from mnemo.app.db.qdrant import get_qdrant_client
+
+logger = logging.getLogger(__name__)
 
 
 async def run_extraction(ctx: dict, episode_id: str, user_id: str) -> None:
     """Load episode, extract facts, resolve and store semantic edges."""
-    async with async_session_factory() as db:
-        episode = await get_episode(db, episode_id)
-        if episode is None:
-            return
-        content = episode.content or ""
-        facts = await extract_facts(content, user_id)
-        if not facts:
+    try:
+        async with async_session_factory() as db:
+            count = await process_episode_extraction(db, episode_id, user_id)
             await db.commit()
-            return
-        qdrant = get_qdrant_client()
-        await ensure_collection(qdrant)
-        await resolve_and_store(facts, user_id, episode_id, db, qdrant)
-        await db.commit()
+            logger.info(
+                "extraction complete episode=%s user=%s facts_stored=%d",
+                episode_id,
+                user_id,
+                count,
+            )
+    except Exception:
+        logger.exception(
+            "extraction worker failed episode=%s user=%s",
+            episode_id,
+            user_id,
+        )
+        raise
 
 
 async def repair_qdrant_points(ctx: dict, user_id: str | None = None) -> int:
