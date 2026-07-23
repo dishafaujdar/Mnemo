@@ -14,6 +14,7 @@ import logging
 from mnemo.app.core.config import settings
 from mnemo.app.models.extraction import TripletFact
 from mnemo.app.services.extraction.judge import review_status_for_tier
+from mnemo.app.services.ontology.canonical import normalize_object
 from mnemo.app.services.ontology.manager import get_ontology
 from mnemo.app.services.ontology.seed import GLINER_RELATION_LABELS
 
@@ -115,7 +116,9 @@ def extract(content: str) -> list[TripletFact]:
         if match.is_rejected:
             continue
         subject = _normalize_subject(head)
-        obj = tail
+        obj = normalize_object(tail)
+        if not obj:
+            continue
         key = (subject.lower(), match.relation, obj.lower())
         if key in seen:
             continue

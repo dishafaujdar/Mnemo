@@ -11,6 +11,11 @@ from mnemo.app.services.conflict.groups import (
     TRANSITION_RELATIONS,
     slot_for_relation,
 )
+from mnemo.app.services.ontology.canonical import (
+    MAX_OBJECT_WORDS_STORE,
+    is_blacklisted_relation,
+    object_word_count,
+)
 
 _BORN_PATTERN = re.compile(r"\b(?:born|birth)\b", re.IGNORECASE)
 _RESIDENCE_PATTERN = re.compile(
@@ -117,6 +122,12 @@ def validate_fact_against_source(content: str, fact: TripletFact) -> bool:
         return False
 
     relation = fact.relation.upper()
+
+    # Blacklisted relations and oversized objects are never stored.
+    if is_blacklisted_relation(relation):
+        return False
+    if object_word_count(obj) > MAX_OBJECT_WORDS_STORE:
+        return False
 
     # BORN_IN is never inferred — require explicit birth language in the source.
     if relation == "BORN_IN" and not _BORN_PATTERN.search(text):

@@ -72,3 +72,12 @@ async def set_fact(
     await db.execute(stmt)
     await db.flush()
     await invalidate_profile_cache(user_id)
+
+
+async def delete_fact(db: AsyncSession, user_id: str, key: str) -> None:
+    """Remove a profile key when no active semantic edge backs it."""
+    from sqlalchemy import delete
+
+    await db.execute(delete(ProfileFact).where(ProfileFact.user_id == user_id, ProfileFact.key == key))
+    await db.flush()
+    await invalidate_profile_cache(user_id)

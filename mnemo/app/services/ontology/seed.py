@@ -48,6 +48,7 @@ MULTI_RELATIONS: frozenset[str] = frozenset(
         "BUILDING",
         "STRUGGLES_WITH",
         "HAS",
+        "HAS_PET",
     }
 )
 
@@ -159,6 +160,11 @@ SEED_ALIASES: dict[str, str] = {
     "visited": "VISITED",
     "traveled to": "TRAVELED_TO",
     "met": "MET",
+    # pets
+    "has pet": "HAS_PET",
+    "has pets": "HAS_PET",
+    "live with": "HAS_PET",
+    "lives with": "HAS_PET",
 }
 
 
@@ -200,4 +206,5 @@ GLINER_RELATION_LABELS: list[str] = [
     "interested in",
     "works on",
     "building",
+    "has pet",
 ]

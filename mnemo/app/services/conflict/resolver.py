@@ -13,9 +13,10 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 from mnemo.app.db.models import SemanticEdge, UnknownRelation
 from mnemo.app.db.qdrant import ensure_collection, get_qdrant_client, point_exists, set_point_payload, upsert_points
 from mnemo.app.models.extraction import REVIEW_PENDING, TripletFact
-from mnemo.app.services.conflict.temporal import stamp_retracted_at, utc_now
+from mnemo.app.services.conflict.temporal import safe_invalid_at, stamp_retracted_at, utc_now
+from mnemo.app.services.conflict.pre_insert_dedup import should_skip_as_duplicate
 from mnemo.app.services.embeddings import get_embedding
-from mnemo.app.services.memory.profile import set_fact
+from mnemo.app.services.memory.profile import delete_fact, set_fact
 from mnemo.app.services.conflict.semantic import (
     find_conflicting_edges,
     is_cross_relation_duplicate,
@@ -137,7 +138,7 @@ async def close_edges(
 ) -> None:
     """Close old facts by setting valid_until and retracted_at; rows are never deleted."""
     for edge, valid_until in closures:
-        edge.invalid_at = valid_until
+        edge.invalid_at = safe_invalid_at(edge.valid_at, valid_until)
         stamp_retracted_at(edge, retracted_at)
     await db.flush()
     if qdrant_client is not None:
@@ -145,12 +146,13 @@ async def close_edges(
             point_id = edge.qdrant_id or edge.id
             if not point_id:
                 continue
+            closed_at = edge.invalid_at
             try:
                 await set_point_payload(
                     qdrant_client,
                     point_id,
                     {
-                        "invalid_at": valid_until.isoformat(),
+                        "invalid_at": closed_at.isoformat(),
                         "retracted_at": retracted_at.isoformat(),
                     },
                 )
@@ -179,21 +181,23 @@ async def insert_edge(
     user_id: str,
     qdrant_client,
     valid_at: datetime | None = None,
+    valid_until: datetime | None = None,
 ) -> str:
     """Insert new semantic edge and upsert vector; return edge id."""
     now = valid_at or utc_now()
+    closed_at = safe_invalid_at(now, valid_until) if valid_until is not None else None
     edge_id = _gen_id()
     vector = await get_embedding(fact.fact_string)
     payload = {
         "user_id": user_id,
         "edge_id": edge_id,
         "episode_id": episode_id,
-        "invalid_at": None,
+        "invalid_at": closed_at.isoformat() if closed_at else None,
         "relation": fact.relation,
         "valid_at": now.isoformat(),
         "fact_string": fact.fact_string,
         "confidence": fact.confidence,
-        "retracted_at": None,
+        "retracted_at": utc_now().isoformat() if closed_at else None,
     }
     point = PointStruct(id=edge_id, vector=vector, payload=payload)
     await upsert_points(qdrant_client, [point])
@@ -210,15 +214,20 @@ async def insert_edge(
         qdrant_id=edge_id,
         episode_id=episode_id,
         confidence=fact.confidence,
+        source_span=fact.source_span or None,
+        temporal_status=fact.temporal_status or None,
         valid_at=now,
-        invalid_at=None,
+        invalid_at=closed_at,
         created_at=now,
     )
+    if closed_at is not None:
+        stamp_retracted_at(row, utc_now())
     db.add(row)
     await db.flush()
     if fact.review_status == REVIEW_PENDING:
         await _record_unknown_relation(db, fact)
-    await _maybe_update_profile(db, user_id, fact)
+    if closed_at is None:
+        await _maybe_update_profile(db, user_id, fact)
     return edge_id
 
 
@@ -414,12 +423,37 @@ async def reconcile_active_edges(
     return len(closures)
 
 
+async def _retract_others_in_category(
+    db: AsyncSession,
+    user_id: str,
+    category: str,
+    keep_objects: set[str],
+    active_edges: list[SemanticEdge],
+    qdrant_client,
+) -> None:
+    """Retract active facts in ``category`` whose object is not in ``keep_objects``."""
+    if category.upper() != "USES":
+        return
+    now = utc_now()
+    closures: list[tuple[SemanticEdge, datetime]] = []
+    for edge in active_edges:
+        if edge.relation.upper() != "USES":
+            continue
+        if edge.invalid_at is not None:
+            continue
+        if edge.object.strip().lower() not in keep_objects:
+            closures.append((edge, now))
+    if closures:
+        await close_edges(db, closures, now, qdrant_client)
+
+
 async def resolve_and_store(
     new_facts: list[TripletFact],
     user_id: str,
     episode_id: str,
     db: AsyncSession,
     qdrant_client=None,
+    retract_others_in_category: str | None = None,
 ) -> None:
     """
     Bi-temporal resolution with semantic conflict detection:
@@ -437,27 +471,64 @@ async def resolve_and_store(
 
     for fact in ordered_facts:
         rel = fact.relation.upper()
-        if rel in EMPLOYMENT_PAST_RELATIONS and any(
-            e.relation.upper() == "WORKS_AT" for e in active_edges
+        if (
+            rel in EMPLOYMENT_PAST_RELATIONS
+            and not fact.retraction_signal
+            and any(e.relation.upper() == "WORKS_AT" for e in active_edges)
         ):
             continue
 
-        if any(is_exact_duplicate(fact, edge) or is_cross_relation_duplicate(fact, edge) for edge in active_edges):
+        if not fact.retraction_signal and any(
+            is_exact_duplicate(fact, edge) or is_cross_relation_duplicate(fact, edge)
+            for edge in active_edges
+        ):
+            continue
+
+        if not fact.retraction_signal and await should_skip_as_duplicate(db, user_id, fact):
             continue
 
         fact_valid_at = utc_now()
         retracted_at = utc_now()
-        conflicts = await find_conflicting_edges(fact, active_edges)
-        if conflicts:
-            closures = [(edge, fact_valid_at) for edge in conflicts]
-            await close_edges(db, closures, retracted_at, qdrant_client)
-            conflict_ids = {e.id for e in conflicts}
-            active_edges = [e for e in active_edges if e.id not in conflict_ids]
 
+        if not fact.retraction_signal:
+            conflicts = await find_conflicting_edges(fact, active_edges)
+            if conflicts:
+                closures = [(edge, fact_valid_at) for edge in conflicts]
+                await close_edges(db, closures, retracted_at, qdrant_client)
+                conflict_ids = {e.id for e in conflicts}
+                active_edges = [e for e in active_edges if e.id not in conflict_ids]
+
+        valid_until = fact_valid_at if fact.retraction_signal else None
         edge_id = await insert_edge(
-            db, fact, episode_id, user_id, qdrant_client, valid_at=fact_valid_at
+            db,
+            fact,
+            episode_id,
+            user_id,
+            qdrant_client,
+            valid_at=fact_valid_at,
+            valid_until=valid_until,
         )
-        # Track newly inserted edge so later facts in the batch see it.
+
+        if fact.retraction_signal:
+            closed_at = safe_invalid_at(fact_valid_at, fact_valid_at)
+            active_edges.append(
+                SemanticEdge(
+                    id=edge_id,
+                    user_id=user_id,
+                    subject=fact.subject.lower(),
+                    relation=fact.relation,
+                    object=fact.object,
+                    fact_string=fact.fact_string,
+                    confidence=fact.confidence,
+                    valid_at=fact_valid_at,
+                    invalid_at=closed_at,
+                    episode_id=episode_id,
+                    created_at=fact_valid_at,
+                )
+            )
+            continue
+
+        # Track newly inserted active edge so later facts in the batch see it.
         active_edges.append(
             SemanticEdge(
                 id=edge_id,
@@ -474,21 +545,68 @@ async def resolve_and_store(
             )
         )
 
+    if retract_others_in_category:
+        keep_objects = {
+            f.object.strip().lower()
+            for f in new_facts
+            if f.relation.upper() == retract_others_in_category.upper()
+            and not f.retraction_signal
+        }
+        active_edges = await get_all_active_edges(db, user_id)
+        await _retract_others_in_category(
+            db,
+            user_id,
+            retract_others_in_category,
+            keep_objects,
+            active_edges,
+            qdrant_client,
+        )
+
     await reconcile_active_edges(db, user_id, qdrant_client)
 
 
 async def sync_profile_from_active_edges(db: AsyncSession, user_id: str) -> None:
     """Rebuild profile keys from current active semantic edges (source of truth)."""
     ontology = get_ontology()
+
+    # role ← newest active IS or HAS_ROLE
+    role_edges: list[SemanticEdge] = []
+    for relation in ("IS", "HAS_ROLE"):
+        role_edges.extend(await get_active_edges(db, user_id, "user", relation))
+    if role_edges:
+        edge = max(role_edges, key=lambda e: e.valid_at)
+        value = _profile_value_for_object(edge.relation, edge.object)
+        if value:
+            await set_fact(db, user_id, "role", value)
+    else:
+        await delete_fact(db, user_id, "role")
+
+    # company ← newest active WORKS_AT
+    company_edges = await get_active_edges(db, user_id, "user", "WORKS_AT")
+    if company_edges:
+        edge = max(company_edges, key=lambda e: e.valid_at)
+        value = _profile_value_for_object("WORKS_AT", edge.object)
+        if value:
+            await set_fact(db, user_id, "company", value)
+        else:
+            await delete_fact(db, user_id, "company")
+    else:
+        await delete_fact(db, user_id, "company")
+
     for relation, key in PROFILE_RELATIONS.items():
+        if key in {"role", "company"}:
+            continue
         edges = await get_active_edges(db, user_id, "user", relation)
         if not edges:
+            await delete_fact(db, user_id, key)
             continue
         if ontology.is_singular(relation):
             edge = max(edges, key=lambda e: e.valid_at)
             value = _profile_value_for_object(edge.relation, edge.object)
             if value:
                 await set_fact(db, user_id, key, value)
+            else:
+                await delete_fact(db, user_id, key)
         else:
             values: list[str] = []
             seen: set[str] = set()
@@ -499,6 +617,8 @@ async def sync_profile_from_active_edges(db: AsyncSession, user_id: str) -> None
                     values.append(value)
             if values:
                 await set_fact(db, user_id, key, values, value_type="list")
+            else:
+                await delete_fact(db, user_id, key)
 
     # current_stack = languages/tools from USES (never companies).
     uses_edges = await get_active_edges(db, user_id, "user", "USES")
@@ -513,6 +633,8 @@ async def sync_profile_from_active_edges(db: AsyncSession, user_id: str) -> None
             stack.append(token)
     if stack:
         await set_fact(db, user_id, "current_stack", stack, value_type="list")
+    else:
+        await delete_fact(db, user_id, "current_stack")
 
 
 async def _maybe_update_profile(db, user_id: str, fact: TripletFact) -> None:

@@ -25,6 +25,7 @@ from mnemo.app.services.ontology.seed import (
     SEED_BEHAVIOR,
     RelationBehavior,
 )
+from mnemo.app.services.ontology.canonical import is_blacklisted_relation
 
 TIER_CONFIRMED = "confirmed"
 TIER_FUZZY = "fuzzy"
@@ -111,7 +112,38 @@ class OntologyManager:
 
     # -- normalization -----------------------------------------------------
     def normalize(self, relation_raw: str) -> MatchResult:
-        """Map a raw relation string to a canonical relation + tier."""
+        """Sync alias lookup only (legacy). Prefer :meth:`normalize_async`."""
+        return self._normalize_alias(relation_raw)
+
+    async def normalize_async(self, relation_raw: str) -> MatchResult:
+        """Map a raw relation via alias fast-path, then semantic matching."""
+        alias_result = self._normalize_alias(relation_raw)
+        if alias_result.tier in (TIER_CONFIRMED, TIER_FUZZY):
+            if is_blacklisted_relation(alias_result.relation):
+                return MatchResult(
+                    alias_result.relation,
+                    relation_raw,
+                    0.0,
+                    TIER_REJECT,
+                    alias_result.behavior,
+                )
+            return alias_result
+
+        from mnemo.app.services.ontology.semantic_match import semantic_normalize
+
+        semantic = await semantic_normalize(relation_raw)
+        if is_blacklisted_relation(semantic.relation):
+            return MatchResult(
+                semantic.relation,
+                relation_raw,
+                semantic.match_score,
+                TIER_REJECT,
+                semantic.behavior,
+            )
+        return semantic
+
+    def _normalize_alias(self, relation_raw: str) -> MatchResult:
+        """Map a raw relation string to a canonical relation + tier (alias/fuzzy)."""
         key = _alias_key(relation_raw)
         if not key:
             return MatchResult(

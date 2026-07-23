@@ -1,16 +1,11 @@
-"""Two-stage extraction orchestration.
+"""Multi-step extraction orchestration.
 
-Flow (see module ``gliner_extractor``, ``structured_extractor``, ``judge``):
+Step 1 — Temporal classification per clause (``temporal_classifier``)
+Step 2 — Fact extraction (GLiNER2 + focused LLM)
+Step 3 — Grounding validation (``grounding``) — in ``service.gate_facts``
+Step 4 — Confidence gate + needs_review — in ``service.gate_facts``
 
-    raw text
-      -> STEP 1: GLiNER2 (fast, local) with confidence routing
-           - confidence >= gliner_high_confidence  -> accept directly
-           - confidence <  gliner_high_confidence   -> send to Step 2
-      -> STEP 2: Instructor + Groq structured re-extraction (only if needed)
-           - judge score gates store / review / discard
-      -> merge + dedupe (LLM wins ties: it validated against the raw text)
-
-Step 3 (bi-temporal resolution) happens in ``conflict.resolver``.
+Bi-temporal resolution happens in ``conflict.resolver`` after gating.
 """
 
 from __future__ import annotations
@@ -18,9 +13,15 @@ from __future__ import annotations
 import logging
 
 from mnemo.app.core.config import settings
-from mnemo.app.models.extraction import TripletFact
+from mnemo.app.models.extraction import ExtractionResult, TripletFact
 from mnemo.app.services.extraction import gliner_extractor, structured_extractor
-from mnemo.app.services.extraction.judge import apply_judge
+from mnemo.app.services.extraction.grounding import ensure_source_spans
+from mnemo.app.services.extraction.judge import apply_judge, review_status_for_tier
+from mnemo.app.services.extraction.temporal_apply import apply_temporal_metadata
+from mnemo.app.services.extraction.temporal_classifier import classify_clauses
+from mnemo.app.services.extraction.temporal_signals import apply_temporal_signals
+from mnemo.app.services.ontology.canonical import normalize_object
+from mnemo.app.services.ontology.manager import TIER_UNKNOWN, get_ontology
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +34,6 @@ def _merge_facts(
     gliner_facts: list[TripletFact],
     llm_facts: list[TripletFact],
 ) -> list[TripletFact]:
-    """Merge two fact lists, deduped by (subject, relation, object).
-
-    LLM facts take precedence on collision because they were validated against
-    the raw user text; otherwise keep the higher-confidence fact.
-    """
     by_key: dict[tuple[str, str, str], TripletFact] = {}
     for fact in gliner_facts:
         by_key[_dedupe_key(fact)] = fact
@@ -52,7 +48,6 @@ def _merge_facts(
 def _route_gliner(
     facts: list[TripletFact],
 ) -> tuple[list[TripletFact], list[TripletFact]]:
-    """Split GLiNER facts into (high-confidence accept, needs-LLM)."""
     high: list[TripletFact] = []
     low: list[TripletFact] = []
     for fact in facts:
@@ -63,33 +58,83 @@ def _route_gliner(
     return high, low
 
 
-async def extract_facts(content: str, user_id: str | None = None) -> list[TripletFact]:
-    """Run the two-stage extraction pipeline and return validated triplets."""
-    if not content or not content.strip():
-        return []
+async def _normalize_merged_facts(facts: list[TripletFact]) -> list[TripletFact]:
+    ontology = get_ontology()
+    normalized: list[TripletFact] = []
+    seen: set[tuple[str, str, str]] = set()
+    for fact in facts:
+        raw = fact.relation_raw or fact.relation
+        match = await ontology.normalize_async(raw)
+        if match.is_rejected or match.tier == TIER_UNKNOWN:
+            continue
+        obj = normalize_object(fact.object)
+        if not obj:
+            continue
+        key = (fact.subject.lower(), match.relation, obj.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        rel_phrase = match.relation.lower().replace("_", " ")
+        normalized.append(
+            fact.model_copy(
+                update={
+                    "relation": match.relation,
+                    "object": obj,
+                    "fact_string": f"{fact.subject} {rel_phrase} {obj}",
+                    "relation_raw": raw,
+                    "relation_match_score": match.match_score,
+                    "review_status": review_status_for_tier(match.tier),
+                }
+            )
+        )
+    return normalized
 
-    # STEP 1: fast local extraction.
+
+async def extract_facts(content: str, user_id: str | None = None) -> ExtractionResult:
+    """Run the multi-step extraction pipeline."""
+    if not content or not content.strip():
+        return ExtractionResult()
+
+    # STEP 1 — temporal classification per clause
+    classified = await classify_clauses(content)
+
+    # STEP 2 — fact extraction (GLiNER + focused LLM)
     gliner_facts = gliner_extractor.extract(content)
     high_conf, low_conf = _route_gliner(gliner_facts)
 
-    # STEP 2: LLM re-extraction when GLiNER is unsure or found nothing.
     needs_llm = bool(low_conf) or not gliner_facts
     llm_facts: list[TripletFact] = []
+    retract_others: str | None = None
     if needs_llm:
-        raw_llm = await structured_extractor.extract(content, gliner_facts)
-        llm_facts = apply_judge(raw_llm)
+        logger.info(
+            "Pipeline invoking LLM (gliner_high=%d gliner_low=%d)",
+            len(high_conf),
+            len(low_conf),
+        )
+        llm_result = await structured_extractor.extract(content, gliner_facts, classified)
+        llm_facts = apply_judge(llm_result.facts)
+        retract_others = llm_result.retract_others_in_category
+    else:
+        logger.info(
+            "Pipeline skipping LLM — all %d GLiNER facts above confidence threshold",
+            len(high_conf),
+        )
 
-    # When the LLM validated facts, it supersedes the low-confidence GLiNER
-    # candidates. If the LLM stage produced nothing (unavailable/failed), keep
-    # the low-confidence GLiNER facts so we never silently drop information.
     base = high_conf if (needs_llm and llm_facts) else high_conf + low_conf
     merged = _merge_facts(base, llm_facts)
+    merged = await _normalize_merged_facts(merged)
+    merged = ensure_source_spans(merged, content)
+    merged = apply_temporal_metadata(merged, classified)
+    merged, retract_others = apply_temporal_signals(
+        content, merged, retract_others_in_category=retract_others
+    )
+
     logger.debug(
-        "extraction: gliner=%d (high=%d low=%d) llm=%d merged=%d",
+        "extraction: clauses=%d gliner=%d llm=%d merged=%d retract_others=%s",
+        len(classified),
         len(gliner_facts),
-        len(high_conf),
-        len(low_conf),
         len(llm_facts),
         len(merged),
+        retract_others,
     )
-    return merged
+    return ExtractionResult(facts=merged, retract_others_in_category=retract_others)

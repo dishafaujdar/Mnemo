@@ -39,3 +39,28 @@ def client():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture
+async def db_session():
+    """Async DB session with a throwaway episode for FK-backed tables."""
+    from datetime import datetime
+    from uuid import uuid4
+
+    from mnemo.app.db.models import Episode
+    from mnemo.app.db.sqlite import async_session_factory
+
+    episode_id = str(uuid4())
+    async with async_session_factory() as session:
+        session.add(
+            Episode(
+                id=episode_id,
+                user_id="u_test",
+                role="user",
+                content="test",
+                created_at=datetime.utcnow(),
+            )
+        )
+        await session.commit()
+        yield session, episode_id
+        await session.rollback()

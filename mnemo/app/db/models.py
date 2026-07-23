@@ -56,6 +56,8 @@ class SemanticEdge(Base):
         nullable=False,
     )
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source_span: Mapped[str | None] = mapped_column(Text, nullable=True)
+    temporal_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     valid_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     invalid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
@@ -103,3 +105,27 @@ class UnknownRelation(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint("relation", name="uq_unknown_relations_relation"),)
+
+
+class NeedsReviewFact(Base):
+    """Facts rejected by grounding/confidence gates — pending human review."""
+
+    __tablename__ = "needs_review_facts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    episode_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("episodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    relation: Mapped[str] = mapped_column(String(128), nullable=False)
+    object: Mapped[str] = mapped_column(String(512), nullable=False)
+    fact_string: Mapped[str] = mapped_column(Text, nullable=False)
+    source_span: Mapped[str | None] = mapped_column(Text, nullable=True)
+    temporal_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    rejection_reason: Mapped[str] = mapped_column(String(255), nullable=False)
+    relation_raw: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

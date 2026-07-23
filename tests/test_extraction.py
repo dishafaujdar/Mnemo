@@ -109,7 +109,8 @@ def test_judge_action_thresholds():
 def test_review_status_for_tier():
     assert review_status_for_tier(TIER_CONFIRMED) == REVIEW_CONFIRMED
     assert review_status_for_tier(TIER_FUZZY) == REVIEW_FUZZY
-    assert review_status_for_tier(TIER_UNKNOWN) == REVIEW_PENDING
+    from mnemo.app.models.extraction import REVIEW_UNKNOWN
+    assert review_status_for_tier(TIER_UNKNOWN) == REVIEW_UNKNOWN
 
 
 def test_apply_judge_filters_and_flags():
@@ -143,34 +144,39 @@ async def test_extract_facts_high_conf_skips_llm(monkeypatch):
     high = _fact(obj="Python", conf=0.95, source="gliner")
     monkeypatch.setattr(gliner_extractor, "extract", lambda content: [high])
 
-    async def _no_llm(content, gliner_facts=None):
+    async def _no_llm(content, gliner_facts=None, classified=None):
+        from mnemo.app.models.extraction import ExtractionResult
         raise AssertionError("LLM should not be called for all-high-confidence facts")
 
     monkeypatch.setattr(structured_extractor, "extract", _no_llm)
-    facts = await pipeline.extract_facts("I use Python", user_id="u1")
-    assert [f.object for f in facts] == ["Python"]
+    result = await pipeline.extract_facts("I use Python", user_id="u1")
+    assert [f.object for f in result.facts] == ["Python"]
 
 
 async def test_extract_facts_low_conf_triggers_llm(monkeypatch):
     low = _fact(obj="Stripe", relation="WORKS_AT", conf=0.5, source="gliner")
     monkeypatch.setattr(gliner_extractor, "extract", lambda content: [low])
 
-    async def _llm(content, gliner_facts=None):
-        return [_fact(obj="Stripe", relation="WORKS_AT", conf=0.96, source="llm")]
+    async def _llm(content, gliner_facts=None, classified=None):
+        from mnemo.app.models.extraction import ExtractionResult
+        return ExtractionResult(
+            facts=[_fact(obj="Stripe", relation="WORKS_AT", conf=0.96, source="llm")]
+        )
 
     monkeypatch.setattr(structured_extractor, "extract", _llm)
-    facts = await pipeline.extract_facts("I work for Stripe", user_id="u1")
-    assert len(facts) == 1
-    assert facts[0].source == "llm" and facts[0].confidence == 0.96
+    result = await pipeline.extract_facts("I work for Stripe", user_id="u1")
+    assert len(result.facts) == 1
+    assert result.facts[0].source == "llm" and result.facts[0].confidence == 0.96
 
 
 async def test_extract_facts_llm_fallback_keeps_gliner_when_llm_empty(monkeypatch):
     low = _fact(obj="Stripe", relation="WORKS_AT", conf=0.5, source="gliner")
     monkeypatch.setattr(gliner_extractor, "extract", lambda content: [low])
 
-    async def _empty(content, gliner_facts=None):
-        return []
+    async def _empty(content, gliner_facts=None, classified=None):
+        from mnemo.app.models.extraction import ExtractionResult
+        return ExtractionResult()
 
     monkeypatch.setattr(structured_extractor, "extract", _empty)
-    facts = await pipeline.extract_facts("I work for Stripe", user_id="u1")
-    assert [f.object for f in facts] == ["Stripe"]  # not dropped
+    result = await pipeline.extract_facts("I work for Stripe", user_id="u1")
+    assert [f.object for f in result.facts] == ["Stripe"]  # not dropped

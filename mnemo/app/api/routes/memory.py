@@ -67,18 +67,16 @@ async def retrieve(
     user_id: str,
     query: str = "",
     token_budget: int | None = None,
-    valid_only: bool = False,
     _api_key: str = Depends(require_api_key),
     session: AsyncSession = Depends(get_session),
 ):
     """Hybrid search → ranked context; include profile.
 
-    By default returns all facts (active and retracted). Retracted facts include
-    ``valid_until`` and ``retracted_at``. Pass ``valid_only=true`` for current facts only.
+    Returns only active, non-retracted facts (invalid_at IS NULL, retracted_at IS NULL).
     """
     budget = token_budget or settings.default_token_budget
     memories = await hybrid_retrieve(
-        session, query, user_id, token_budget=budget, valid_only=valid_only
+        session, query, user_id, token_budget=budget, valid_only=True
     )
     print(f"[DEBUG] retrieve relevance_scores={[m[7] for m in memories]}")
     profile = await get_profile(session, user_id)

@@ -17,6 +17,7 @@ from mnemo.app.models.extraction import (
     REVIEW_FUZZY,
     REVIEW_PENDING,
     REVIEW_REJECTED,
+    REVIEW_UNKNOWN,
     TripletFact,
 )
 from mnemo.app.services.ontology.manager import (
@@ -34,7 +35,7 @@ ACTION_DISCARD = "discard"
 _TIER_TO_STATUS = {
     TIER_CONFIRMED: REVIEW_CONFIRMED,
     TIER_FUZZY: REVIEW_FUZZY,
-    TIER_UNKNOWN: REVIEW_PENDING,
+    TIER_UNKNOWN: REVIEW_UNKNOWN,
     TIER_REJECT: REVIEW_REJECTED,
 }
 

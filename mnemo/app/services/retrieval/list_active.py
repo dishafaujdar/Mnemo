@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mnemo.app.db.models import SemanticEdge
 from mnemo.app.models.extraction import REVIEW_CONFIRMED
 from mnemo.app.services.conflict.groups import TRANSITION_RELATIONS
-from mnemo.app.services.conflict.temporal import retracted_at
+from mnemo.app.services.conflict.temporal import active_edge_sql_conditions, retracted_at
 from mnemo.app.services.retrieval.bm25_search import BM25Result
 
 # Same tuple shape as BM25Result
@@ -27,7 +27,7 @@ async def list_active_memories(
     """Return semantic edges for a user, newest first (used when retrieve query is empty)."""
     conditions = [SemanticEdge.user_id == user_id]
     if valid_only:
-        conditions.append(SemanticEdge.invalid_at.is_(None))
+        conditions.extend(active_edge_sql_conditions())
     if confirmed_only:
         conditions.append(SemanticEdge.review_status == REVIEW_CONFIRMED)
     # Hide transition/event facts (legacy rows or extraction slip-through).

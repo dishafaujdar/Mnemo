@@ -8,6 +8,7 @@ from pydantic import BaseModel
 REVIEW_CONFIRMED = "confirmed"  # canonical relation, exact ontology match
 REVIEW_FUZZY = "fuzzy"  # matched via fuzzy alias, auto-learned
 REVIEW_PENDING = "pending"  # unknown relation, stored but flagged for audit
+REVIEW_UNKNOWN = "unknown"  # could not map to a canonical relation; skip storage
 REVIEW_REJECTED = "rejected"  # discarded (kept only for debugging/telemetry)
 
 
@@ -26,6 +27,10 @@ class TripletFact(BaseModel):
     fact_string: str
     confidence: float = 1.0
 
+    # Grounding + temporal pipeline fields
+    source_span: str = ""
+    temporal_status: str = "unspecified"  # current | past | future | unspecified
+
     # Provenance / soft-ontology metadata (optional, defaulted for back-compat).
     relation_raw: str = ""  # what the extractor originally emitted
     relation_match_score: float = 1.0  # fuzzy ontology match score (0..1)
@@ -33,3 +38,11 @@ class TripletFact(BaseModel):
     reasoning: str = ""  # LLM justification grounded in raw text
     temporal_hint: str | None = None  # e.g. "last month", "since 2020"
     source: str = ""  # "gliner" | "llm"
+    retraction_signal: bool = False  # historical fact: store then close immediately
+
+
+class ExtractionResult(BaseModel):
+    """Output of the extraction pipeline including episode-level retraction hints."""
+
+    facts: list[TripletFact] = []
+    retract_others_in_category: str | None = None  # e.g. "USES" = exhaustive tool list

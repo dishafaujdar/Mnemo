@@ -90,6 +90,7 @@ async def search_semantic(
     must: list[Any] = [FieldCondition(key="user_id", match=MatchValue(value=user_id))]
     if valid_only:
         must.append(IsNullCondition(is_null=PayloadField(key="invalid_at")))
+        must.append(IsNullCondition(is_null=PayloadField(key="retracted_at")))
     query_filter = Filter(must=must)
     results = await client.query_points(
         collection_name=COLLECTION_NAME,
