@@ -138,6 +138,7 @@ async def extract(
             response_model=LLMFactList,
             max_retries=2,
             temperature=0.0,
+            max_tokens=settings.llm_max_tokens,
             messages=[
                 {"role": "system", "content": _system_prompt()},
                 {"role": "user", "content": _user_prompt(content, gliner_facts, classified)},

@@ -12,7 +12,7 @@ from mnemo.app.services.extraction.temporal_apply import apply_temporal_metadata
 from mnemo.app.services.extraction.temporal_classifier import (
     ClassifiedClause,
     classify_clauses,
-    split_clauses,
+    classify_temporal_status,
     temporal_status_for_span,
 )
 from mnemo.app.services.extraction.temporal_signals import apply_temporal_signals
@@ -39,35 +39,195 @@ def _fact(**kw) -> TripletFact:
 
 
 # --- Step 1: temporal classification ----------------------------------------
-def test_split_clauses_splits_on_but():
-    parts = split_clauses(
-        "I used to play football but switched to basketball two years ago."
+def _mock_llm_response(payload: str):
+    """Build a stub matching the OpenAI chat-completions response shape."""
+
+    class _Msg:
+        content = payload
+
+    class _Choice:
+        message = _Msg()
+
+    class _Resp:
+        choices = [_Choice()]
+
+    class _Completions:
+        async def create(self, **kwargs):
+            _Resp.kwargs = kwargs
+            return _Resp()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        chat = _Chat()
+
+    return _Client(), _Resp
+
+
+def _install_mock_llm(monkeypatch, payload: str):
+    monkeypatch.setattr(settings, "nvidia_api_key", "nvapi-test")
+    client, resp = _mock_llm_response(payload)
+    monkeypatch.setattr(
+        "mnemo.app.services.extraction.temporal_classifier.get_raw_client",
+        lambda: client,
     )
-    assert len(parts) == 2
-    assert "used to play football" in parts[0].lower()
-    assert "switched to basketball" in parts[1].lower()
+    return resp
+
+
+# The five contract cases the classifier must satisfy.
+TEMPORAL_CASES = [
+    (
+        "I used to play football but switched to basketball",
+        [
+            {"clause": "I used to play football", "status": "PAST"},
+            {"clause": "switched to basketball", "status": "CURRENT"},
+        ],
+    ),
+    (
+        "I live with two cats named Luna and Milo",
+        [{"clause": "I live with two cats named Luna and Milo", "status": "CURRENT"}],
+    ),
+    (
+        "I recently started learning guitar",
+        [{"clause": "I recently started learning guitar", "status": "CURRENT"}],
+    ),
+    (
+        "I was a backend engineer, now I am an AI researcher at Anthropic",
+        [
+            {"clause": "I was a backend engineer", "status": "PAST"},
+            {"clause": "now I am an AI researcher at Anthropic", "status": "CURRENT"},
+        ],
+    ),
+    (
+        "I will join Google next month",
+        [{"clause": "I will join Google next month", "status": "FUTURE"}],
+    ),
+]
+
+
+@pytest.mark.parametrize("sentence,expected", TEMPORAL_CASES)
+@pytest.mark.asyncio
+async def test_classify_temporal_status_contract(monkeypatch, sentence, expected):
+    import json as _json
+
+    _install_mock_llm(monkeypatch, _json.dumps(expected))
+    assert await classify_temporal_status(sentence) == expected
 
 
 @pytest.mark.asyncio
-async def test_classify_clauses_heuristic_without_api(monkeypatch):
+async def test_classifier_uses_temperature_zero_and_token_cap(monkeypatch):
+    resp = _install_mock_llm(
+        monkeypatch, '[{"clause": "I like sushi", "status": "UNSPECIFIED"}]'
+    )
+    await classify_temporal_status("I like sushi")
+    assert resp.kwargs["temperature"] == 0
+    assert resp.kwargs["max_tokens"] == 300
+
+
+@pytest.mark.asyncio
+async def test_classifier_falls_back_to_unspecified_on_bad_json(monkeypatch):
+    _install_mock_llm(monkeypatch, "not json at all")
+    out = await classify_temporal_status("I like sushi")
+    assert out == [{"clause": "I like sushi", "status": "UNSPECIFIED"}]
+
+
+@pytest.mark.asyncio
+async def test_classifier_rejects_invalid_status_label(monkeypatch):
+    _install_mock_llm(monkeypatch, '[{"clause": "I like sushi", "status": "MAYBE"}]')
+    out = await classify_temporal_status("I like sushi")
+    assert out == [{"clause": "I like sushi", "status": "UNSPECIFIED"}]
+
+
+@pytest.mark.asyncio
+async def test_classifier_falls_back_when_no_api_key(monkeypatch):
+    monkeypatch.setattr(settings, "nvidia_api_key", "")
     monkeypatch.setattr(settings, "groq_api_key", "")
     monkeypatch.setattr(settings, "openai_api_key", "")
+    out = await classify_temporal_status("I used to play football")
+    assert out == [{"clause": "I used to play football", "status": "UNSPECIFIED"}]
 
-    async def _heuristic_only(sentence: str):
-        from mnemo.app.services.extraction import temporal_classifier as tc
 
-        return tc._heuristic_label(sentence)
-
-    monkeypatch.setattr(
-        "mnemo.app.services.extraction.temporal_classifier.classify_temporal_status",
-        _heuristic_only,
+@pytest.mark.asyncio
+async def test_classify_clauses_assigns_offsets_per_sentence(monkeypatch):
+    _install_mock_llm(
+        monkeypatch,
+        '[{"clause": "I live with two cats named Luna and Milo.", "status": "CURRENT"}]',
     )
-    classified = await classify_clauses(TEST_INPUT)
-    by_text = {c.text.lower(): c.temporal_status for c in classified}
-    assert any("used to play football" in t and s == "past" for t, s in by_text.items())
-    assert any("switched to basketball" in t and s == "current" for t, s in by_text.items())
-    assert any("learning guitar" in t and s == "current" for t, s in by_text.items())
-    assert any("live with two cats" in t for t in by_text)
+    text = "I live with two cats named Luna and Milo."
+    classified = await classify_clauses(text)
+    assert [c.temporal_status for c in classified] == ["current"]
+    assert classified[0].start == 0
+    assert classified[0].end == len(text)
+
+
+def _classified_for_test_input() -> list[ClassifiedClause]:
+    """Clause labels for TEST_INPUT, as the LLM classifier would return them."""
+    labels = [
+        ("I used to play football", "past"),
+        ("switched to basketball two years ago.", "current"),
+        ("I am learning guitar since last month.", "current"),
+        ("I live with two cats named Luna and Milo.", "current"),
+    ]
+    out = []
+    for text, status in labels:
+        start = TEST_INPUT.find(text)
+        out.append(
+            ClassifiedClause(
+                text=text, temporal_status=status, start=start, end=start + len(text)
+            )
+        )
+    return out
+
+
+def test_span_is_attributed_by_position_not_shared_words():
+    """A span starting with "I" must not inherit the first clause's past label."""
+    classified = _classified_for_test_input()
+    pet_span = "I live with two cats named Luna and Milo"
+    assert temporal_status_for_span(pet_span, classified, TEST_INPUT) == "current"
+    assert (
+        temporal_status_for_span("I used to play football", classified, TEST_INPUT)
+        == "past"
+    )
+
+
+def test_pet_facts_stay_current_end_to_end():
+    classified = _classified_for_test_input()
+    pets = [
+        _fact(
+            relation="HAS_PET",
+            object=name,
+            fact_string=f"user has pet {name}",
+            source_span="I live with two cats named Luna and Milo",
+        )
+        for name in ("Luna", "Milo")
+    ]
+    out = apply_temporal_metadata(pets, classified, TEST_INPUT)
+    assert all(f.temporal_status == "current" for f in out)
+    assert not any(f.retraction_signal for f in out)
+
+
+def test_engagement_duplicates_collapse_to_most_specific():
+    from mnemo.app.services.extraction.validators import dedupe_batch_facts
+
+    facts = [
+        _fact(
+            relation="INTERESTED_IN",
+            object="guitar",
+            fact_string="user interested in guitar",
+            source_span="I am also learning to play guitar since last month.",
+        ),
+        _fact(
+            relation="LEARNING",
+            object="guitar",
+            fact_string="user learning guitar",
+            source_span="I am also learning to play guitar since last month.",
+        ),
+    ]
+    out = dedupe_batch_facts(facts, source_text=TEST_INPUT)
+    guitar = [f for f in out if f.object == "guitar"]
+    assert len(guitar) == 1
+    assert guitar[0].relation == "LEARNING"
 
 
 def test_apply_temporal_metadata_sets_retraction_for_past():
@@ -208,6 +368,7 @@ async def test_gate_facts_skips_future_facts(db_session):
 # --- Full pipeline (mocked LLM) ---------------------------------------------
 @pytest.mark.asyncio
 async def test_pipeline_football_cats_scenario(monkeypatch):
+    monkeypatch.setattr(settings, "nvidia_api_key", "")
     monkeypatch.setattr(settings, "groq_api_key", "")
     monkeypatch.setattr(settings, "openai_api_key", "")
     monkeypatch.setattr(gliner_extractor, "extract", lambda content: [])

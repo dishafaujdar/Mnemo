@@ -12,13 +12,14 @@ from mnemo.app.services.extraction.temporal_classifier import (
 def apply_temporal_metadata(
     facts: list[TripletFact],
     classified: list[ClassifiedClause],
+    original_text: str = "",
 ) -> list[TripletFact]:
     """Set temporal_status and retraction_signal from clause classification."""
     updated: list[TripletFact] = []
     for fact in facts:
         status = fact.temporal_status
         if not status or status == "unspecified":
-            status = temporal_status_for_span(fact.source_span, classified)
+            status = temporal_status_for_span(fact.source_span, classified, original_text)
         if status == "unspecified":
             status = "current"
         retraction = status == "past"

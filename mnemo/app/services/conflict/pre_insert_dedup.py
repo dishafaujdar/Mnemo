@@ -23,23 +23,18 @@ class DuplicateVerdict(BaseModel):
 
 async def _llm_confirm_duplicate(fact_a: str, fact_b: str) -> bool:
     from mnemo.app.core.config import settings as cfg
+    from mnemo.app.services.extraction.llm_client import get_instructor_client, llm_api_key
 
-    api_key = cfg.groq_api_key or cfg.openai_api_key
-    if not api_key:
+    if not llm_api_key():
         return False
     try:
-        import instructor
-        from openai import AsyncOpenAI
-
-        client = instructor.from_openai(
-            AsyncOpenAI(api_key=api_key, base_url=cfg.groq_base_url),
-            mode=instructor.Mode.JSON,
-        )
+        client = get_instructor_client()
         result: DuplicateVerdict = await client.chat.completions.create(
             model=cfg.extraction_model,
             response_model=DuplicateVerdict,
             max_retries=1,
             temperature=0.0,
+            max_tokens=cfg.llm_max_tokens,
             messages=[
                 {
                     "role": "system",

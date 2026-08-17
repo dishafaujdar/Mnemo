@@ -178,6 +178,44 @@ def _pick_slot_winner(candidates: list[TripletFact], source_text: str) -> Triple
     return max(candidates, key=_rank)
 
 
+# Relations that describe the same kind of engagement with an object. When an
+# episode yields several of these for one object, only the most specific is kept.
+_ENGAGEMENT_RELATION_RANK: dict[str, int] = {
+    "LEARNING": 60,
+    "HAS_SKILL": 55,
+    "PLAYS": 50,
+    "PLAYED": 45,
+    "USES": 40,
+    "ENJOYS": 30,
+    "INTERESTED_IN": 20,
+    "PREFERS": 10,
+}
+
+
+def _collapse_engagement_duplicates(facts: list[TripletFact]) -> list[TripletFact]:
+    """Keep one relation per (subject, object) among overlapping engagement verbs."""
+    best_by_object: dict[tuple[str, str], TripletFact] = {}
+    order: list[TripletFact] = []
+
+    for fact in facts:
+        rank = _ENGAGEMENT_RELATION_RANK.get(fact.relation.upper())
+        if rank is None:
+            order.append(fact)
+            continue
+        key = (fact.subject.strip().lower(), fact.object.strip().lower())
+        current = best_by_object.get(key)
+        if current is None:
+            best_by_object[key] = fact
+            order.append(fact)
+            continue
+        current_rank = _ENGAGEMENT_RELATION_RANK[current.relation.upper()]
+        if rank > current_rank:
+            best_by_object[key] = fact
+            order[order.index(current)] = fact
+
+    return order
+
+
 def dedupe_batch_facts(
     facts: list[TripletFact],
     source_text: str = "",
@@ -227,4 +265,4 @@ def dedupe_batch_facts(
             continue
         seen.add(key)
         unique.append(fact)
-    return unique
+    return _collapse_engagement_duplicates(unique)

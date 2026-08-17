@@ -124,7 +124,7 @@ async def extract_facts(content: str, user_id: str | None = None) -> ExtractionR
     merged = _merge_facts(base, llm_facts)
     merged = await _normalize_merged_facts(merged)
     merged = ensure_source_spans(merged, content)
-    merged = apply_temporal_metadata(merged, classified)
+    merged = apply_temporal_metadata(merged, classified, content)
     merged, retract_others = apply_temporal_signals(
         content, merged, retract_others_in_category=retract_others
     )

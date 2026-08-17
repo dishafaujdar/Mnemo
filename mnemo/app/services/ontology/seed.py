@@ -49,6 +49,7 @@ MULTI_RELATIONS: frozenset[str] = frozenset(
         "STRUGGLES_WITH",
         "HAS",
         "HAS_PET",
+        "PLAYS",
     }
 )
 
@@ -60,6 +61,7 @@ TEMPORAL_RELATIONS: frozenset[str] = frozenset(
         "VISITED",
         "TRAVELED_TO",
         "MET",
+        "PLAYED",
     }
 )
 
@@ -160,6 +162,12 @@ SEED_ALIASES: dict[str, str] = {
     "visited": "VISITED",
     "traveled to": "TRAVELED_TO",
     "met": "MET",
+    "played": "PLAYED",
+    "used to play": "PLAYED",
+    # SPORTS / ACTIVITIES
+    "plays": "PLAYS",
+    "play": "PLAYS",
+    "playing": "PLAYS",
     # pets
     "has pet": "HAS_PET",
     "has pets": "HAS_PET",
@@ -207,4 +215,6 @@ GLINER_RELATION_LABELS: list[str] = [
     "works on",
     "building",
     "has pet",
+    "plays",
+    "played",
 ]

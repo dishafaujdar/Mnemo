@@ -48,17 +48,12 @@ class RelationPick(BaseModel):
 
 
 async def _llm_pick_relation(relation_raw: str) -> str | None:
-    api_key = settings.groq_api_key or settings.openai_api_key
-    if not api_key:
+    from mnemo.app.services.extraction.llm_client import get_instructor_client, llm_api_key
+
+    if not llm_api_key():
         return None
     try:
-        import instructor
-        from openai import AsyncOpenAI
-
-        client = instructor.from_openai(
-            AsyncOpenAI(api_key=api_key, base_url=settings.groq_base_url),
-            mode=instructor.Mode.JSON,
-        )
+        client = get_instructor_client()
         options = "\n".join(
             f"- {rel}: {desc}" for rel, desc in CANONICAL_RELATIONS.items()
         )
@@ -67,6 +62,7 @@ async def _llm_pick_relation(relation_raw: str) -> str | None:
             response_model=RelationPick,
             max_retries=1,
             temperature=0.0,
+            max_tokens=settings.llm_max_tokens,
             messages=[
                 {
                     "role": "system",
